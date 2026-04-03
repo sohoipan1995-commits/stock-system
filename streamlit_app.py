@@ -7,13 +7,19 @@ from datetime import datetime, timedelta
 import ta
 
 # ====================== 页面配置 ======================
-st.set_page_config(page_title="終極撈底系統", layout="wide", page_icon="📊")
+st.set_page_config(page_title="終極撈底預警系統", layout="wide", page_icon="📊")
 
 # ====================== 全局常量 ======================
 GANN_CYCLES = [7,14,21,28,49,60,90,120,180]
 HK_POOL = ["0700.HK","9988.HK","3690.HK","1810.HK","0981.HK","0005.HK","0001.HK","0762.HK"]
 US_POOL = ["AAPL","MSFT","NVDA","TSLA","AMZN","META","GOOGL","BABA","JD","BIDU"]
 INDEX_POOL = {"恆生指數":"^HSI","恆生科技":"^HSTECH","標普500":"^GSPC","納指100":"^NDX","道瓊斯":"^DJI","VIX":"^VIX"}
+# 自动监测的指数
+AUTO_VOLUME_INDEXES = {
+    "恆生指數": "^HSI",
+    "標普500": "^GSPC",
+    "納斯達克": "^IXIC"
+}
 
 # ====================== 記憶清單 ======================
 if "watchlist" not in st.session_state:
@@ -140,7 +146,12 @@ def gann_dates_with_importance(piv):
                 })
     df = pd.DataFrame(res)
     if df.empty: return df
-    cnt = df.groupby("轉勢日").agg({"重要性":"sum","週期":lambda x: ",".join(x),"來源":lambda x: ",".join(x),"原因":lambda x: ",".join(x)}).rename(columns={"重要性":"共振分數"})
+    cnt = df.groupby("轉勢日").agg({
+        "重要性":"sum",
+        "週期":lambda x: ",".join(x),
+        "來源":lambda x: ",".join(x),
+        "原因":lambda x: ",".join(x)
+    }).rename(columns={"重要性":"共振分數"}).reset_index()
     df = df.merge(cnt, on="轉勢日")
     df = df.sort_values(["共振分數","轉勢日"], ascending=[False,True])
     df["重要性評級"] = df["共振分數"].apply(lambda x: "⭐⭐⭐ 極高" if x >=5 else "⭐⭐ 高" if x >=3 else "⭐ 中")
@@ -194,10 +205,11 @@ def crash_risk_with_reasons():
             "風險分數":s,
             "主要原因":", ".join(reasons) if reasons else "無特殊風險因素"
         })
-    return pd.DataFrame(out).sort_values("風險分數", ascending=False)
+    # 按日期升序排列（用户要求）
+    return pd.DataFrame(out).sort_values("日期", ascending=True)
 
 # 🔧 纯Plotly成交量图，完全无matplotlib依赖
-def plot_volume_chart_plotly(df, ticker):
+def plot_volume_chart_plotly(df, ticker_name):
     df = df.reset_index()
     recent_vol = df["Volume"].iloc[-1]
     pct = percentile(df["Volume"].values, recent_vol)
@@ -222,7 +234,7 @@ def plot_volume_chart_plotly(df, ticker):
                   annotation_text=f"今日: {recent_vol:.0f} ({pct}%)", annotation_position="top left")
     
     fig.update_layout(
-        title=f"{ticker} 三年成交量走勢",
+        title=f"{ticker_name} 三年成交量走勢",
         xaxis_title="日期",
         yaxis_title="成交量",
         height=400,
@@ -260,7 +272,8 @@ if mode == "個股綜合分析":
     code = st.text_input("輸入代碼", placeholder="0700.HK / AAPL / ^HSI")
     if code and st.button("開始分析"):
         df = get_data(code)
-        if df is None: st.error("無法獲取資料")
+        if df is None: 
+            st.error("無法獲取資料")
         else:
             c = df.Close.iloc[-1]
             hh = df.High.max()
@@ -293,32 +306,37 @@ elif mode == "多股監控清單(記憶)":
     if st.button("加入清單") and new_item:
         if new_item not in st.session_state.watchlist:
             st.session_state.watchlist.append(new_item)
-    delete_item = st.selectbox("從清單移除", st.session_state.watchlist)
+    delete_item = st.selectbox("從清單移除", st.session_state.watchlist) if st.session_state.watchlist else st.selectbox("從清單移除", ["清單為空"], disabled=True)
     if st.button("刪除") and delete_item in st.session_state.watchlist:
         st.session_state.watchlist.remove(delete_item)
 
-    for code in st.session_state.watchlist:
-        df = get_data(code)
-        if df is None: continue
-        c = df.Close.iloc[-1]
-        hh = df.High.max()
-        drop = round((hh-c)/hh*100,1)
-        fib = fib_levels(df)
-        score, rating, color, reasons = bottom_score(df)
-        
-        with st.expander(f"{code} | 現價 {c} | 跌幅 {drop}% | 撈底評分 {score}/100", expanded=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("📈 黃金分割支撐")
-                st.dataframe(pd.DataFrame([fib]).T, use_container_width=True)
+    if st.session_state.watchlist:
+        for code in st.session_state.watchlist:
+            df = get_data(code)
+            if df is None: 
+                st.warning(f"無法獲取{code}的數據")
+                continue
+            c = df.Close.iloc[-1]
+            hh = df.High.max()
+            drop = round((hh-c)/hh*100,1)
+            fib = fib_levels(df)
+            score, rating, color, reasons = bottom_score(df)
             
-            with col2:
-                st.subheader("📉 精細跌幅位")
-                st.dataframe(price_levels_fine(df), use_container_width=True)
-            
-            st.subheader("🎯 撈底建議")
-            st.markdown(f"**建議:** <span style='color:{color}'>{rating}</span>", unsafe_allow_html=True)
-            st.write("評分理由: " + ", ".join(reasons))
+            with st.expander(f"{code} | 現價 {c} | 跌幅 {drop}% | 撈底評分 {score}/100", expanded=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("📈 黃金分割支撐")
+                    st.dataframe(pd.DataFrame([fib]).T, use_container_width=True)
+                
+                with col2:
+                    st.subheader("📉 精細跌幅位")
+                    st.dataframe(price_levels_fine(df), use_container_width=True)
+                
+                st.subheader("🎯 撈底建議")
+                st.markdown(f"**建議:** <span style='color:{color}'>{rating}</span>", unsafe_allow_html=True)
+                st.write("評分理由: " + ", ".join(reasons))
+    else:
+        st.info("清單為空，請新增股票代碼")
 
 # -------------------- 江恩 + K線 --------------------
 elif mode == "江恩轉勢日 + K線":
@@ -329,11 +347,20 @@ elif mode == "江恩轉勢日 + K線":
         gd = gann_dates_with_importance(piv)
 
         st.subheader("重要高低點 (兩年內)")
-        st.dataframe(piv, use_container_width=True)
+        if not piv.empty:
+            st.dataframe(piv, use_container_width=True)
+        else:
+            st.info("暫無重要高低點數據")
 
         st.subheader("未來半年轉勢日 (含重要性)")
-        gd_display = gd[["轉勢日","共振分數","重要性評級","週期","來源","原因"]]
-        st.dataframe(gd_display, use_container_width=True)
+        if not gd.empty:
+            # 安全获取列，防止KeyError
+            columns_to_show = ["轉勢日","共振分數","重要性評級","週期","來源","原因"]
+            available_columns = [col for col in columns_to_show if col in gd.columns]
+            gd_display = gd[available_columns]
+            st.dataframe(gd_display, use_container_width=True)
+        else:
+            st.info("暫無轉勢日數據")
 
         st.subheader("K線圖 + 紅線標註轉勢日")
         date_list = pd.to_datetime(gd["轉勢日"]).tolist() if not gd.empty else []
@@ -341,7 +368,7 @@ elif mode == "江恩轉勢日 + K線":
 
 # -------------------- 大跌風險 --------------------
 elif mode == "未來半年大跌風險":
-    st.subheader("📉 未來半年高機率大跌日期 (含詳細原因)")
+    st.subheader("📉 未來半年高機率大跌日期 (按時間排序)")
     risk_df = crash_risk_with_reasons()
     st.dataframe(risk_df, use_container_width=True)
     st.info("🔴 高風險請減倉｜系統基於10年週期、季末、月尾、節奏統計")
@@ -368,16 +395,43 @@ elif mode == "撈底評分排行榜":
     rank_df = pd.DataFrame(result).sort_values("撈底評分", ascending=False)
     st.dataframe(rank_df, use_container_width=True)
 
-# -------------------- 成交量監測 --------------------
+# -------------------- 成交量監測（自动追踪）--------------------
 elif mode == "成交量監測系統":
-    st.subheader("📊 成交量監測 (三年數據)")
+    st.subheader("📊 成交量監測系統 (自動追蹤主要指數)")
+    st.info("自動監控：恆生指數、標普500、納斯達克")
+    
+    for name, ticker in AUTO_VOLUME_INDEXES.items():
+        st.subheader(f"📈 {name} ({ticker})")
+        vol_df = get_volume_data(ticker)
+        if vol_df is None:
+            st.error(f"無法獲取{name}成交量數據")
+        else:
+            # 用Plotly画成交量图
+            fig = plot_volume_chart_plotly(vol_df, name)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            recent_vol = vol_df["Volume"].iloc[-1]
+            pct = percentile(vol_df["Volume"].values, recent_vol)
+            ratio = recent_vol / np.mean(vol_df["Volume"].tail(5).values) if np.mean(vol_df["Volume"].tail(5).values) > 0 else 1
+            
+            st.subheader(f"{name} 成交量分析結果")
+            if ratio >= 4:
+                st.error(f"🔴 劇烈放量: 成交量是近期均值的{ratio:.1f}倍，處於三年{int(pct)}百分位")
+            elif ratio <= 0.6:
+                st.success(f"🟢 地量: 成交量是近期均值的{ratio:.1f}倍，處於三年{int(pct)}百分位")
+            elif ratio >= 2:
+                st.warning(f"🟠 放量: 成交量是近期均值的{ratio:.1f}倍，處於三年{int(pct)}百分位")
+            else:
+                st.info(f"📊 正常量: 成交量是近期均值的{ratio:.1f}倍，處於三年{int(pct)}百分位")
+    
+    # 手动输入额外代码
+    st.subheader("🔍 手動查詢其他代碼")
     code = st.text_input("輸入股票代碼")
     if code and st.button("分析成交量"):
         vol_df = get_volume_data(code)
         if vol_df is None:
             st.error("無法獲取成交量數據")
         else:
-            # 纯Plotly绘制，无任何外部依赖
             fig = plot_volume_chart_plotly(vol_df, code)
             st.plotly_chart(fig, use_container_width=True)
             
